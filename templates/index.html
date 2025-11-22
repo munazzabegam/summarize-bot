@@ -1,0 +1,497 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Meeting Summary Bot</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}" />
+  </head>
+  <body>
+    <div class="app">
+      <header>
+        <h1>Meeting Summary Bot</h1>
+        <p>Paste a transcript to generate concise meeting summaries and action items using Gemini.</p>
+      </header>
+
+      <main>
+        <div class="main-content">
+          <section class="chat-window" id="chat-window"></section>
+
+          <form id="chat-form">
+            <label for="transcript">Meeting Transcript</label>
+            <textarea id="transcript" name="transcript" placeholder="Paste the meeting transcript here..." required></textarea>
+
+            <label for="email">Email Address (Optional)</label>
+            <input type="email" id="email" name="email" placeholder="Enter email to receive summary..." />
+
+            <button type="submit" id="submit-btn">Summarize</button>
+          </form>
+        </div>
+
+        <aside class="recent-meetings-section">
+          <div class="recent-meetings-header">
+            <h2>Recent Meetings</h2>
+            <button id="refresh-meetings-btn" class="refresh-btn" title="Refresh">↻</button>
+          </div>
+          <div id="recent-meetings-list" class="recent-meetings-list">
+            <p class="loading-text">Loading recent meetings...</p>
+          </div>
+        </aside>
+      </main>
+
+      <footer>
+        <small>Configure your Gemini API key via the <code>GEMINI_API_KEY</code> environment variable.</small>
+      </footer>
+    </div>
+
+<script>
+    const chatWindow = document.getElementById("chat-window");
+    const chatForm = document.getElementById("chat-form");
+    const submitBtn = document.getElementById("submit-btn");
+
+    let history = [];
+
+    function appendUserMessage(transcript) {
+        const message = document.createElement("div");
+        message.classList.add("message", "user");
+
+        const transcriptLabel = document.createElement("strong");
+        transcriptLabel.textContent = "Transcript";
+        message.appendChild(transcriptLabel);
+
+        const transcriptBlock = document.createElement("pre");
+        transcriptBlock.textContent = transcript;
+        message.appendChild(transcriptBlock);
+
+        // Removed logic to display 'Notes' as the input field is not in the UI
+        
+        chatWindow.appendChild(message);
+        chatWindow.scrollTop = chatWindow.scrollHeight;
+    }
+
+    function parseMarkdownToSections(text) {
+        const sections = {
+            summary: [],
+            keyDecisions: [],
+            actionItems: []
+        };
+        
+        const lines = text.split('\n');
+        let currentSection = null;
+        
+        for (let line of lines) {
+            const originalLine = line;
+            line = line.trim();
+            
+            // Skip empty lines but don't reset currentSection
+            if (!line) continue;
+            
+            // Check for section headers - more specific matching
+            const headerMatch = line.match(/^#+\s*(.+)$/i);
+            if (headerMatch) {
+                const headerText = headerMatch[1].toLowerCase().trim();
+                
+                if (headerText === 'summary') {
+                    currentSection = 'summary';
+                    continue;
+                } else if (headerText.includes('key') && headerText.includes('decision')) {
+                    currentSection = 'keyDecisions';
+                    continue;
+                } else if (headerText.startsWith('action')) {
+                    // Match "action items", "action item", "actions", etc.
+                    // This is more flexible and catches all action-related headers
+                    currentSection = 'actionItems';
+                    continue;
+                }
+                
+                // Unknown header, reset section
+                currentSection = null;
+                continue;
+            }
+            
+            // Only process content if we're in a recognized section
+            if (!currentSection) continue;
+            
+            // Handle bullet points (various formats) - check this first
+            if (line.match(/^[-*•]\s+/)) {
+                const content = line.replace(/^[-*•]\s+/, '').trim();
+                if (content && !content.match(/^(none noted|none|n\/a|na)\.?$/i)) {
+                    sections[currentSection].push(content);
+                }
+            }
+            // Handle numbered lists
+            else if (line.match(/^\d+\.\s+/)) {
+                const content = line.replace(/^\d+\.\s+/, '').trim();
+                if (content && !content.match(/^(none noted|none|n\/a|na)\.?$/i)) {
+                    sections[currentSection].push(content);
+                }
+            }
+            // Handle continuation lines - only process if we already have items
+            else if (sections[currentSection].length > 0) {
+                const lastItem = sections[currentSection][sections[currentSection].length - 1];
+                // Only append as continuation if last item doesn't end with punctuation
+                if (lastItem && !lastItem.trim().match(/[.!?:]$/)) {
+                    sections[currentSection][sections[currentSection].length - 1] += " " + line;
+                } else {
+                    // New item without bullet marker
+                    if (line && !line.match(/^(none noted|none|n\/a|na)\.?$/i)) {
+                        sections[currentSection].push(line);
+                    }
+                }
+            }
+            // First item in section without bullet marker
+            else {
+                if (line && !line.match(/^(none noted|none|n\/a|na)\.?$/i)) {
+                    sections[currentSection].push(line);
+                }
+            }
+        }
+        
+        return sections;
+    }
+
+    function appendAssistantMessage(reply) {
+        const message = document.createElement("div");
+        message.classList.add("message", "assistant");
+        
+        const sections = parseMarkdownToSections(reply);
+        
+        // Create Summary section
+        if (sections.summary.length > 0) {
+            const summarySection = document.createElement("div");
+            summarySection.classList.add("summary-section");
+            
+            const summaryTitle = document.createElement("h3");
+            summaryTitle.classList.add("section-title", "summary-title");
+            summaryTitle.textContent = "Summary";
+            summarySection.appendChild(summaryTitle);
+            
+            const summaryList = document.createElement("ul");
+            summaryList.classList.add("section-list");
+            sections.summary.forEach(item => {
+                const li = document.createElement("li");
+                li.textContent = item;
+                summaryList.appendChild(li);
+            });
+            summarySection.appendChild(summaryList);
+            message.appendChild(summarySection);
+        }
+        
+        // Create Key Decisions section
+        if (sections.keyDecisions.length > 0) {
+            const decisionsSection = document.createElement("div");
+            decisionsSection.classList.add("summary-section");
+            
+            const decisionsTitle = document.createElement("h3");
+            decisionsTitle.classList.add("section-title", "decisions-title");
+            decisionsTitle.textContent = "Key Decisions";
+            decisionsSection.appendChild(decisionsTitle);
+            
+            const decisionsList = document.createElement("ul");
+            decisionsList.classList.add("section-list");
+            sections.keyDecisions.forEach(item => {
+                const li = document.createElement("li");
+                li.textContent = item;
+                decisionsList.appendChild(li);
+            });
+            decisionsSection.appendChild(decisionsList);
+            message.appendChild(decisionsSection);
+        }
+        
+        // Create Action Items section
+        if (sections.actionItems.length > 0) {
+            const actionSection = document.createElement("div");
+            actionSection.classList.add("summary-section");
+            
+            const actionTitle = document.createElement("h3");
+            actionTitle.classList.add("section-title", "action-title");
+            actionTitle.textContent = "Action Items";
+            actionSection.appendChild(actionTitle);
+            
+            const actionList = document.createElement("ul");
+            actionList.classList.add("section-list");
+            sections.actionItems.forEach(item => {
+                const li = document.createElement("li");
+                li.textContent = item;
+                actionList.appendChild(li);
+            });
+            actionSection.appendChild(actionList);
+            message.appendChild(actionSection);
+        }
+        
+        // Fallback: if no sections were parsed, display as plain text
+        if (sections.summary.length === 0 && sections.keyDecisions.length === 0 && sections.actionItems.length === 0) {
+            message.textContent = reply;
+        }
+        
+        chatWindow.appendChild(message);
+        chatWindow.scrollTop = chatWindow.scrollHeight;
+    }
+
+    function appendErrorMessage(errorText) {
+        const message = document.createElement("div");
+        message.classList.add("message", "assistant");
+        message.textContent = `Error: ${errorText}`;
+        chatWindow.appendChild(message);
+        chatWindow.scrollTop = chatWindow.scrollHeight;
+    }
+
+    const recentMeetingsList = document.getElementById("recent-meetings-list");
+    const refreshMeetingsBtn = document.getElementById("refresh-meetings-btn");
+
+    function formatDate(dateString) {
+        if (!dateString) return "Unknown date";
+        const date = new Date(dateString);
+        return date.toLocaleString();
+    }
+
+    function truncateText(text, maxLength = 100) {
+        if (!text) return "";
+        if (text.length <= maxLength) return text;
+        return text.substring(0, maxLength) + "...";
+    }
+
+    function createMeetingCard(meeting) {
+        const card = document.createElement("div");
+        card.classList.add("meeting-card");
+        
+        const header = document.createElement("div");
+        header.classList.add("meeting-card-header");
+        
+        const date = document.createElement("span");
+        date.classList.add("meeting-date");
+        date.textContent = formatDate(meeting.created_at);
+        header.appendChild(date);
+        
+        const id = document.createElement("span");
+        id.classList.add("meeting-id");
+        id.textContent = `#${meeting.id}`;
+        header.appendChild(id);
+        
+        card.appendChild(header);
+        
+        const preview = document.createElement("div");
+        preview.classList.add("meeting-preview");
+        
+        if (meeting.summary) {
+            const summaryLabel = document.createElement("strong");
+            summaryLabel.textContent = "Summary: ";
+            const summaryText = document.createElement("span");
+            summaryText.textContent = truncateText(meeting.summary, 80);
+            preview.appendChild(summaryLabel);
+            preview.appendChild(summaryText);
+        }
+        
+        card.appendChild(preview);
+        
+        const expandBtn = document.createElement("button");
+        expandBtn.classList.add("expand-btn");
+        expandBtn.textContent = "View Details";
+        expandBtn.addEventListener("click", () => {
+            showMeetingDetails(meeting);
+        });
+        card.appendChild(expandBtn);
+        
+        return card;
+    }
+
+    function showMeetingDetails(meeting) {
+        // Create a modal or expand the card to show full details
+        const modal = document.createElement("div");
+        modal.classList.add("meeting-modal");
+        
+        const modalContent = document.createElement("div");
+        modalContent.classList.add("meeting-modal-content");
+        
+        const closeBtn = document.createElement("button");
+        closeBtn.classList.add("close-btn");
+        closeBtn.textContent = "×";
+        closeBtn.addEventListener("click", () => {
+            document.body.removeChild(modal);
+        });
+        modalContent.appendChild(closeBtn);
+        
+        const title = document.createElement("h3");
+        title.textContent = `Meeting #${meeting.id} - ${formatDate(meeting.created_at)}`;
+        modalContent.appendChild(title);
+        
+        const inputSection = document.createElement("div");
+        inputSection.classList.add("modal-section");
+        const inputLabel = document.createElement("strong");
+        inputLabel.textContent = "Input Transcript:";
+        inputSection.appendChild(inputLabel);
+        const inputText = document.createElement("pre");
+        inputText.classList.add("modal-text");
+        inputText.textContent = meeting.input || "No input available";
+        inputSection.appendChild(inputText);
+        modalContent.appendChild(inputSection);
+        
+        if (meeting.summary) {
+            const summarySection = document.createElement("div");
+            summarySection.classList.add("modal-section");
+            const summaryLabel = document.createElement("strong");
+            summaryLabel.textContent = "Summary:";
+            summarySection.appendChild(summaryLabel);
+            const summaryText = document.createElement("pre");
+            summaryText.classList.add("modal-text");
+            summaryText.textContent = meeting.summary;
+            summarySection.appendChild(summaryText);
+            modalContent.appendChild(summarySection);
+        }
+        
+        if (meeting.key_decisions) {
+            const decisionsSection = document.createElement("div");
+            decisionsSection.classList.add("modal-section");
+            const decisionsLabel = document.createElement("strong");
+            decisionsLabel.textContent = "Key Decisions:";
+            decisionsSection.appendChild(decisionsLabel);
+            const decisionsText = document.createElement("pre");
+            decisionsText.classList.add("modal-text");
+            decisionsText.textContent = meeting.key_decisions;
+            decisionsSection.appendChild(decisionsText);
+            modalContent.appendChild(decisionsSection);
+        }
+        
+        if (meeting.action_items) {
+            const actionSection = document.createElement("div");
+            actionSection.classList.add("modal-section");
+            const actionLabel = document.createElement("strong");
+            actionLabel.textContent = "Action Items:";
+            actionSection.appendChild(actionLabel);
+            const actionText = document.createElement("pre");
+            actionText.classList.add("modal-text");
+            actionText.textContent = meeting.action_items;
+            actionSection.appendChild(actionText);
+            modalContent.appendChild(actionSection);
+        }
+        
+        modal.appendChild(modalContent);
+        modal.addEventListener("click", (e) => {
+            if (e.target === modal) {
+                document.body.removeChild(modal);
+            }
+        });
+        
+        document.body.appendChild(modal);
+    }
+
+    async function loadRecentMeetings() {
+        try {
+            recentMeetingsList.innerHTML = '<p class="loading-text">Loading recent meetings...</p>';
+            
+            const response = await fetch("/api/recent-meetings?limit=10");
+            const data = await response.json();
+            
+            if (data.meetings && data.meetings.length > 0) {
+                recentMeetingsList.innerHTML = "";
+                data.meetings.forEach(meeting => {
+                    const card = createMeetingCard(meeting);
+                    recentMeetingsList.appendChild(card);
+                });
+            } else {
+                recentMeetingsList.innerHTML = '<p class="no-meetings">No recent meetings found.</p>';
+            }
+        } catch (error) {
+            recentMeetingsList.innerHTML = `<p class="error-text">Error loading meetings: ${error.message}</p>`;
+        }
+    }
+
+    refreshMeetingsBtn.addEventListener("click", loadRecentMeetings);
+    
+    // Load recent meetings on page load
+    loadRecentMeetings();
+
+    chatForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        submitBtn.disabled = true;
+        submitBtn.textContent = "Summarizing…";
+
+        const transcript = chatForm.transcript.value.trim();
+        const email = chatForm.email.value.trim();
+        // Fixed: The directives field is missing from the HTML, so we hardcode it as an empty string.
+        const directives = ""; 
+
+        if (!transcript) {
+            submitBtn.disabled = false;
+            submitBtn.textContent = "Summarize";
+            return;
+        }
+
+        // Only pass transcript to the display function
+        appendUserMessage(transcript);
+
+        const payload = {
+            transcript,
+            email: email || null,
+            // Only send fields that are actually in the UI or required by the server
+            history,
+        };
+
+        try {
+            const response = await fetch("/api/chat", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify(payload),
+            });
+
+            const data = await response.json();
+
+            if (data.reply) {
+                appendAssistantMessage(data.reply);
+                
+                // Show email status if email was provided
+                if (email && data.email_sent !== undefined) {
+                    if (data.email_sent) {
+                        const emailStatus = document.createElement("div");
+                        emailStatus.classList.add("message", "assistant");
+                        emailStatus.style.background = "#059669";
+                        emailStatus.style.color = "white";
+                        emailStatus.textContent = `✓ Summary sent to ${email}`;
+                        chatWindow.appendChild(emailStatus);
+                        chatWindow.scrollTop = chatWindow.scrollHeight;
+                    } else {
+                        const emailStatus = document.createElement("div");
+                        emailStatus.classList.add("message", "assistant");
+                        emailStatus.style.background = "#dc2626";
+                        emailStatus.style.color = "white";
+                        emailStatus.textContent = `✗ Failed to send email to ${email}. Check server logs.`;
+                        chatWindow.appendChild(emailStatus);
+                        chatWindow.scrollTop = chatWindow.scrollHeight;
+                    }
+                }
+                
+                // Refresh recent meetings after successful summary
+                loadRecentMeetings();
+                
+                // History is constructed here using the transcript and 'None.' for directives 
+                const userHistoryContent = [
+                    "Transcript:",
+                    transcript,
+                    "",
+                    "Notes:",
+                    "None." 
+                ].join("\n");
+                
+                history.push({ role: "user", content: userHistoryContent });
+                history.push({ role: "model", content: data.reply });
+                history = history.slice(-10);
+            } else if (data.error) {
+                appendErrorMessage(data.error);
+            } else {
+                appendAssistantMessage("No response received.");
+            }
+        } catch (error) {
+            const message =
+                error instanceof Error ? error.message : String(error);
+            appendErrorMessage(message);
+        } finally {
+            submitBtn.disabled = false;
+            submitBtn.textContent = "Summarize";
+        }
+    });
+</script>
+  </body>
+</html>
+
